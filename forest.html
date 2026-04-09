@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tree Pop - Procedural Forest Generator</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; font-family: 'Courier New', monospace; overflow: hidden; }
+  canvas { display: block; cursor: crosshair; }
+  #ui {
+    position: fixed; top: 10px; left: 10px; z-index: 10;
+    background: rgba(20,30,20,0.88); border: 2px solid #4a7a4a;
+    border-radius: 12px; padding: 14px; color: #c5e8c5; width: 220px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  }
+  #ui h2 { font-size: 15px; margin-bottom: 10px; color: #7fdf7f; letter-spacing: 1px; }
+  .ctrl { margin-bottom: 8px; }
+  .ctrl label { font-size: 11px; display: block; margin-bottom: 3px; opacity: 0.8; }
+  .ctrl input[type=range] { width: 100%; accent-color: #5a5; }
+  .ctrl input[type=color] { width: 32px; height: 24px; border: 1px solid #5a5; background: none; cursor: pointer; vertical-align: middle; }
+  .mode-btn {
+    display: inline-block; padding: 6px 12px; margin: 2px;
+    background: #2a4a2a; border: 1px solid #5a5; color: #c5e8c5;
+    border-radius: 6px; cursor: pointer; font-size: 11px; font-family: inherit;
+  }
+  .mode-btn.active { background: #4a7a4a; color: #fff; }
+  .mode-btn:hover { background: #3a6a3a; }
+  #hint { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    color: rgba(180,220,180,0.6); font-size: 12px; font-family: 'Courier New', monospace;
+    pointer-events: none; }
+  .sep { border-top: 1px solid #3a5a3a; margin: 8px 0; }
+  #colors { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+  .cswatch {
+    width: 24px; height: 24px; border-radius: 50%; cursor: pointer;
+    border: 2px solid transparent; transition: border-color 0.2s;
+  }
+  .cswatch.active { border-color: #fff; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <h2>~ TREE POP ~</h2>
+  <div style="margin-bottom:8px">
+    <button class="mode-btn active" id="btnTree" onclick="setMode('tree')">Plant Trees</button>
+    <button class="mode-btn" id="btnBuild" onclick="setMode('building')">Buildings</button>
+  </div>
+  <div class="sep"></div>
+  <div id="treeControls">
+    <div class="ctrl"><label>Branch Length</label><input type="range" id="brLen" min="15" max="80" value="40"></div>
+    <div class="ctrl"><label>Tree Height</label><input type="range" id="trH" min="60" max="250" value="140"></div>
+    <div class="ctrl"><label>Branch Spread</label><input type="range" id="brSpread" min="15" max="55" value="30"></div>
+    <div class="ctrl"><label>Leaf Density</label><input type="range" id="leafDens" min="3" max="20" value="10"></div>
+    <div class="ctrl"><label>Leaf Color</label>
+      <div id="colors"></div>
+    </div>
+  </div>
+  <div id="buildControls" style="display:none">
+    <div class="ctrl"><label>Building Width</label><input type="range" id="bw" min="30" max="120" value="60"></div>
+    <div class="ctrl"><label>Building Height</label><input type="range" id="bh" min="80" max="300" value="160"></div>
+    <div class="ctrl"><label>Wobble Amount</label><input type="range" id="wobble" min="0" max="15" value="6"></div>
+  </div>
+  <div class="sep"></div>
+  <div class="ctrl"><label>Wind Strength</label><input type="range" id="wind" min="0" max="100" value="35"></div>
+  <button class="mode-btn" onclick="clearAll()" style="margin-top:4px">Clear All</button>
+</div>
+<div id="hint">Drag on the canvas to plant trees or place buildings</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+// --- State ---
+let mode = 'tree';
+let trees = [];
+let buildings = [];
+let birds = [];
+let time = 0;
+let dragging = false;
+let dragStart = null;
+let dragEnd = null;
+
+const LEAF_PALETTES = [
+  ['#4a8c3f','#5da14e','#3b7a30','#6db85e'],
+  ['#c7522a','#e5803a','#d4442a','#f0a050'],
+  ['#d4a017','#e8c840','#c89020','#f0d860'],
+  ['#d45070','#e87090','#c04060','#f090a8'],
+  ['#8050a0','#a070c0','#7040b0','#b888d0'],
+  ['#e08080','#f0a0a0','#d06060','#f8c0b0'],
+];
+let selectedPalette = 0;
+
+// Build color swatches
+const colorsDiv = document.getElementById('colors');
+LEAF_PALETTES.forEach((pal, i) => {
+  const sw = document.createElement('div');
+  sw.className = 'cswatch' + (i === 0 ? ' active' : '');
+  sw.style.background = pal[0];
+  sw.onclick = () => {
+    document.querySelectorAll('.cswatch').forEach(s => s.classList.remove('active'));
+    sw.classList.add('active');
+    selectedPalette = i;
+  };
+  colorsDiv.appendChild(sw);
+});
+
+function setMode(m) {
+  mode = m;
+  document.getElementById('btnTree').classList.toggle('active', m === 'tree');
+  document.getElementById('btnBuild').classList.toggle('active', m === 'building');
+  document.getElementById('treeControls').style.display = m === 'tree' ? 'block' : 'none';
+  document.getElementById('buildControls').style.display = m === 'building' ? 'block' : 'none';
+}
+
+function clearAll() { trees = []; buildings = []; }
+
+// --- Simplex-like noise for wind ---
+function noise(x, y) {
+  const s = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+  return s - Math.floor(s);
+}
+function smoothNoise(x) {
+  const i = Math.floor(x);
+  const f = x - i;
+  const t = f * f * (3 - 2 * f);
+  return noise(i, 0) * (1 - t) + noise(i + 1, 0) * t;
+}
+
+// --- Jitter for hand-drawn look ---
+function jit(v, amount) { return v + (Math.random() - 0.5) * amount; }
+function jitLine(ctx, x1, y1, x2, y2, jitter) {
+  const steps = Math.max(3, Math.floor(Math.hypot(x2-x1, y2-y1) / 8));
+  ctx.beginPath();
+  ctx.moveTo(jit(x1, jitter), jit(y1, jitter));
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    ctx.lineTo(
+      jit(x1 + (x2 - x1) * t, jitter),
+      jit(y1 + (y2 - y1) * t, jitter)
+    );
+  }
+  ctx.stroke();
+}
+
+// --- Tree ---
+class Tree {
+  constructor(x, y, w, h, palette, branchLen, spread, leafDensity) {
+    this.x = x; this.baseY = y; this.w = w; this.h = h;
+    this.palette = LEAF_PALETTES[palette];
+    this.branchLen = branchLen;
+    this.spread = spread * Math.PI / 180;
+    this.leafDensity = leafDensity;
+    this.seed = Math.random() * 1000;
+    this.trunkWidth = Math.max(3, w * 0.08);
+    this.depth = Math.min(7, Math.max(3, Math.floor(h / branchLen)));
+    this.branches = [];
+    this.generateBranches();
+  }
+  generateBranches() {
+    this.branches = [];
+    this._branch(this.x, this.baseY, -Math.PI / 2, this.branchLen, this.trunkWidth, this.depth);
+  }
+  _branch(x, y, angle, len, width, depth) {
+    const ex = x + Math.cos(angle) * len;
+    const ey = y + Math.sin(angle) * len;
+    this.branches.push({ x1: x, y1: y, x2: ex, y2: ey, width, depth, origAngle: angle, len });
+    if (depth > 0) {
+      const numBranches = 2 + (Math.random() < 0.3 ? 1 : 0);
+      const newLen = len * (0.65 + Math.random() * 0.15);
+      const newWidth = width * 0.65;
+      for (let i = 0; i < numBranches; i++) {
+        const spreadAngle = (i === 0 ? -1 : i === 1 ? 1 : (Math.random() - 0.5) * 0.5) * this.spread;
+        const newAngle = angle + spreadAngle + (Math.random() - 0.5) * 0.2;
+        this._branch(ex, ey, newAngle, newLen, newWidth, depth - 1);
+      }
+    }
+  }
+  draw(ctx, windOffset) {
+    const windStr = parseFloat(document.getElementById('wind').value) / 100;
+    for (const b of this.branches) {
+      const windEffect = windStr * (1 - b.depth / this.depth) * 0.06;
+      const waveVal = Math.sin(time * 1.5 + this.seed + b.x1 * 0.01) * windEffect;
+      const wx1 = b.x1; const wy1 = b.y1;
+      const wx2 = b.x2 + waveVal * b.len * 3;
+      const wy2 = b.y2 + Math.abs(waveVal) * b.len * 0.5;
+      ctx.strokeStyle = b.depth > this.depth * 0.5 ? '#3d2b1f' : '#5a3d2b';
+      ctx.lineWidth = Math.max(1, b.width);
+      ctx.lineCap = 'round';
+      jitLine(ctx, wx1, wy1, wx2, wy2, 1.2);
+      // Leaves at branch tips
+      if (b.depth <= 1) {
+        for (let l = 0; l < this.leafDensity; l++) {
+          const lx = wx2 + (Math.random() - 0.5) * 25;
+          const ly = wy2 + (Math.random() - 0.5) * 25;
+          const lr = 3 + Math.random() * 6;
+          const leafWind = Math.sin(time * 2 + this.seed + l) * windStr * 4;
+          ctx.fillStyle = this.palette[Math.floor(Math.random() * this.palette.length)];
+          ctx.globalAlpha = 0.7 + Math.random() * 0.3;
+          ctx.beginPath();
+          ctx.ellipse(lx + leafWind, ly, lr, lr * 0.6, Math.random() * Math.PI, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+}
+
+// --- Building ---
+class Building {
+  constructor(x, y, w, h, wobbleAmt) {
+    this.x = x; this.baseY = y; this.w = w; this.h = h;
+    this.wobble = wobbleAmt;
+    this.color = `hsl(${200 + Math.random()*40}, ${10+Math.random()*15}%, ${18+Math.random()*15}%)`;
+    this.roofColor = `hsl(${200 + Math.random()*40}, ${10+Math.random()*10}%, ${12+Math.random()*10}%)`;
+    this.windows = [];
+    this.seed = Math.random() * 1000;
+    this.generateWindows();
+  }
+  generateWindows() {
+    const cols = Math.max(1, Math.floor(this.w / 20));
+    const rows = Math.max(1, Math.floor(this.h / 28));
+    const gapX = this.w / (cols + 1);
+    const gapY = this.h / (rows + 1);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (Math.random() > 0.2) {
+          const lit = Math.random() > 0.4;
+          this.windows.push({
+            rx: gapX * (c + 1) - this.w / 2,
+            ry: -gapY * (r + 1),
+            w: 8 + Math.random() * 6,
+            h: 10 + Math.random() * 8,
+            lit,
+            hue: lit ? (40 + Math.random() * 30) : 0,
+            jx: (Math.random() - 0.5) * 4,
+            jy: (Math.random() - 0.5) * 4,
+          });
+        }
+      }
+    }
+  }
+  draw(ctx) {
+    const wb = this.wobble;
+    const windStr = parseFloat(document.getElementById('wind').value) / 100;
+    const sway = Math.sin(time * 0.8 + this.seed) * windStr * wb * 0.3;
+    ctx.save();
+    ctx.translate(this.x, this.baseY);
+    // Wobbly main body
+    ctx.fillStyle = this.color;
+    ctx.beginPath();
+    ctx.moveTo(jit(-this.w/2, wb), 0);
+    ctx.lineTo(jit(-this.w/2 + sway, wb), jit(-this.h, wb));
+    ctx.lineTo(jit(this.w/2 + sway, wb), jit(-this.h, wb));
+    ctx.lineTo(jit(this.w/2, wb), 0);
+    ctx.closePath();
+    ctx.fill();
+    // Wobbly outline
+    ctx.strokeStyle = '#1a1a2a';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    // Roof
+    ctx.fillStyle = this.roofColor;
+    ctx.beginPath();
+    ctx.moveTo(jit(-this.w/2 - 4 + sway, wb), jit(-this.h, wb));
+    ctx.lineTo(jit(sway, wb), jit(-this.h - 15 - Math.random()*10, wb));
+    ctx.lineTo(jit(this.w/2 + 4 + sway, wb), jit(-this.h, wb));
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    // Windows
+    for (const win of this.windows) {
+      const wx = win.rx + sway * (1 + win.ry / this.h) + win.jx;
+      const wy = win.ry + win.jy;
+      if (win.lit) {
+        ctx.fillStyle = `hsla(${win.hue}, 80%, 65%, 0.85)`;
+        ctx.shadowColor = `hsla(${win.hue}, 80%, 65%, 0.4)`;
+        ctx.shadowBlur = 8;
+      } else {
+        ctx.fillStyle = 'rgba(15,15,30,0.8)';
+        ctx.shadowBlur = 0;
+      }
+      ctx.fillRect(jit(wx - win.w/2, 1.5), jit(wy - win.h/2, 1.5), win.w, win.h);
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = '#0a0a15';
+      ctx.lineWidth = 0.8;
+      ctx.strokeRect(wx - win.w/2, wy - win.h/2, win.w, win.h);
+    }
+    ctx.restore();
+  }
+}
+
+// --- Bird ---
+class Bird {
+  constructor() { this.reset(); }
+  reset() {
+    this.x = -40 - Math.random() * 200;
+    this.y = 40 + Math.random() * (H * 0.35);
+    this.speed = 1.2 + Math.random() * 2;
+    this.wingPhase = Math.random() * Math.PI * 2;
+    this.wingSpeed = 4 + Math.random() * 3;
+    this.size = 4 + Math.random() * 5;
+    this.wobbleY = Math.random() * Math.PI * 2;
+  }
+  update() {
+    this.x += this.speed;
+    this.wobbleY += 0.02;
+    if (this.x > W + 60) this.reset();
+  }
+  draw(ctx) {
+    const wing = Math.sin(time * this.wingSpeed + this.wingPhase);
+    const yOff = Math.sin(this.wobbleY) * 8;
+    const y = this.y + yOff;
+    ctx.strokeStyle = '#1a2a1a';
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(this.x - this.size, y + wing * this.size * 0.6);
+    ctx.quadraticCurveTo(this.x, y - Math.abs(wing) * 2, this.x + this.size, y + wing * this.size * 0.6);
+    ctx.stroke();
+    // Body dot
+    ctx.fillStyle = '#1a2a1a';
+    ctx.beginPath();
+    ctx.arc(this.x, y, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// Spawn initial birds
+for (let i = 0; i < 8; i++) {
+  const b = new Bird();
+  b.x = Math.random() * W;
+  birds.push(b);
+}
+
+// --- Mouse / Drag ---
+canvas.addEventListener('mousedown', e => {
+  if (e.target !== canvas) return;
+  dragging = true;
+  dragStart = { x: e.clientX, y: e.clientY };
+  dragEnd = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener('mousemove', e => {
+  if (dragging) dragEnd = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener('mouseup', e => {
+  if (!dragging) return;
+  dragging = false;
+  dragEnd = { x: e.clientX, y: e.clientY };
+  const x1 = Math.min(dragStart.x, dragEnd.x);
+  const y1 = Math.min(dragStart.y, dragEnd.y);
+  const x2 = Math.max(dragStart.x, dragEnd.x);
+  const y2 = Math.max(dragStart.y, dragEnd.y);
+  const rw = Math.max(10, x2 - x1);
+  const rh = Math.max(10, y2 - y1);
+  const cx = (x1 + x2) / 2;
+  const by = y2;
+  if (mode === 'tree') {
+    const brLen = parseFloat(document.getElementById('brLen').value);
+    const trH = parseFloat(document.getElementById('trH').value);
+    const spread = parseFloat(document.getElementById('brSpread').value);
+    const ld = parseFloat(document.getElementById('leafDens').value);
+    trees.push(new Tree(cx, by, rw, trH, selectedPalette, brLen, spread, ld));
+  } else {
+    const bwCtrl = parseFloat(document.getElementById('bw').value);
+    const bhCtrl = parseFloat(document.getElementById('bh').value);
+    const wobCtrl = parseFloat(document.getElementById('wobble').value);
+    buildings.push(new Building(cx, by, bwCtrl, bhCtrl, wobCtrl));
+  }
+  dragStart = dragEnd = null;
+});
+
+// --- Draw Landscape ---
+function drawGround() {
+  // Sky gradient
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#1a2a3a');
+  sky.addColorStop(0.4, '#2a3a2a');
+  sky.addColorStop(1, '#1a3a1a');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+  // Stars
+  for (let i = 0; i < 60; i++) {
+    const sx = noise(i, 1) * W;
+    const sy = noise(i, 2) * H * 0.4;
+    const sa = 0.3 + 0.4 * Math.sin(time * 0.5 + i);
+    ctx.fillStyle = `rgba(200,220,200,${sa})`;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 0.8 + noise(i, 3), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Rolling hills
+  for (let layer = 0; layer < 3; layer++) {
+    const baseY = H * 0.7 + layer * 30;
+    const shade = 25 + layer * 12;
+    ctx.fillStyle = `rgb(${shade},${shade + 30},${shade})`;
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 4) {
+      const yy = baseY + Math.sin(x * 0.003 + layer * 2) * 30 + Math.sin(x * 0.008 + layer) * 15;
+      ctx.lineTo(x, yy);
+    }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // Ground with hand-drawn grass strokes
+  ctx.fillStyle = '#1a3a1a';
+  ctx.fillRect(0, H * 0.82, W, H * 0.18);
+  ctx.strokeStyle = '#2a5a2a';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 150; i++) {
+    const gx = noise(i, 10) * W;
+    const gy = H * 0.82 + noise(i, 11) * H * 0.15;
+    const gh = 5 + noise(i, 12) * 12;
+    const windStr = parseFloat(document.getElementById('wind').value) / 100;
+    const gWind = Math.sin(time * 2 + gx * 0.02) * windStr * 5;
+    ctx.beginPath();
+    ctx.moveTo(gx, gy);
+    ctx.quadraticCurveTo(gx + gWind, gy - gh, gx + gWind * 1.5, gy - gh);
+    ctx.stroke();
+  }
+}
+
+// --- Drag Preview ---
+function drawDragPreview() {
+  if (!dragging || !dragStart || !dragEnd) return;
+  const x1 = Math.min(dragStart.x, dragEnd.x);
+  const y1 = Math.min(dragStart.y, dragEnd.y);
+  const w = Math.abs(dragEnd.x - dragStart.x);
+  const h = Math.abs(dragEnd.y - dragStart.y);
+  ctx.strokeStyle = mode === 'tree' ? 'rgba(100,200,100,0.6)' : 'rgba(100,150,200,0.6)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.strokeRect(x1, y1, w, h);
+  ctx.setLineDash([]);
+  ctx.fillStyle = mode === 'tree' ? 'rgba(100,200,100,0.1)' : 'rgba(100,150,200,0.1)';
+  ctx.fillRect(x1, y1, w, h);
+}
+
+// --- Main Loop ---
+function draw() {
+  time += 0.016;
+  ctx.clearRect(0, 0, W, H);
+  drawGround();
+  // Sort by y for depth
+  buildings.sort((a, b) => a.baseY - b.baseY);
+  for (const b of buildings) b.draw(ctx);
+  trees.sort((a, b) => a.baseY - b.baseY);
+  for (const t of trees) t.draw(ctx, 0);
+  // Birds
+  for (const b of birds) { b.update(); b.draw(ctx); }
+  // Occasionally spawn new birds
+  if (Math.random() < 0.003 && birds.length < 15) birds.push(new Bird());
+  drawDragPreview();
+  requestAnimationFrame(draw);
+}
+draw();
+</script>
+</body>
+</html>
